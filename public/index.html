@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="th"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Proximity Voice</title>
+<style>
+body{font-family:sans-serif;background:#161a1f;color:#eee;margin:0;padding:16px;max-width:480px;margin:auto}
+input,button{font-size:18px;padding:12px;border-radius:10px;border:0;width:100%;box-sizing:border-box;margin:6px 0}
+button{background:#3fa34d;color:#fff}button.off{background:#c0392b}
+.row{display:flex;justify-content:space-between;align-items:center;padding:6px 0}
+.bar{height:8px;background:#333;border-radius:4px;width:50%}.bar i{display:block;height:100%;background:#3fa34d;border-radius:4px}
+#status{font-size:14px;color:#aaa;margin:8px 0}
+</style></head><body>
+<h2>🎤 Proximity Voice</h2>
+<div id="login">
+  <input id="name" placeholder="Gamertag (ชื่อในเกมให้ตรงเป๊ะ)">
+  <button id="join">เข้าร่วม</button>
+</div>
+<div id="app" hidden>
+  <div id="status">กำลังเชื่อมต่อ...</div>
+  <button id="mute">🎤 ไมค์: เปิด</button>
+  <label>ระยะเสียง: <b id="rv">16</b> บล็อก</label>
+  <input id="range" type="range" min="1" max="64" value="16">
+  <h3>ผู้เล่น</h3><div id="list"></div>
+</div>
+<script>
+let ws, stream, ctx, myName; const peers = {};
+const $ = (id) => document.getElementById(id);
+const send = (o) => ws && ws.readyState === 1 && ws.send(JSON.stringify(o));
+
+$("join").onclick = async () => {
+  myName = $("name").value.trim();
+  if (!myName) return;
+  try {
+    ctx = new (window.AudioContext || window.webkitAudioContext)();
+    await ctx.resume();
+    stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
+  } catch (e) { alert("เปิดไมค์ไม่ได้: " + e.message); return; }
+  $("login").hidden = true; $("app").hidden = false;
+  ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/voice");
+  ws.onopen = () => send({ type: "join", name: myName, range: +$("range").value });
+  ws.onclose = () => { $("status").textContent = "หลุดการเชื่อมต่อ รีเฟรชหน้าเพื่อเข้าใหม่"; };
+  ws.onmessage = onMsg;
+};
+
+function makePeer(name, initiator) {
+  const pc = new RTCPeerConnection({ iceServers: [{ urls: "stun:stun.l.google.com:19302" }] });
+  const gain = ctx.createGain(); gain.gain.value = 0; gain.connect(ctx.destination);
+  pc.onicecandidate = (e) => e.candidate && send({ type: "signal", to: name, data: { candidate: e.candidate } });
+  pc.ontrack = (e) => {
+    const a = new Audio(); a.srcObject = e.streams[0]; a.muted = true; a.play().catch(() => {});
+    ctx.createMediaStreamSource(e.streams[0]).connect(gain);
+  };
+  if (initiator) pc.onnegotiationneeded = async () => {
+    await pc.setLocalDescription(await pc.createOffer());
+    send({ type: "signal", to: name, data: { sdp: pc.localDescription } });
+  };
+  stream.getTracks().forEach((t) => pc.addTrack(t, stream));
+  peers[name] = { pc, gain, vol: 0 };
+}
+
+async function onMsg(ev) {
+  const m = JSON.parse(ev.data);
+  if (m.type === "peers") m.peers.forEach((n) => makePeer(n, true));
+  else if (m.type === "peer-joined") { }
+  else if (m.type === "peer-left") { if (peers[m.name]) { peers[m.name].pc.close(); delete peers[m.name]; render(); } }
+  else if (m.type === "signal") {
+    if (!peers[m.from]) makePeer(m.from, false);
+    const pc = peers[m.from].pc, d = m.data;
+    if (d.sdp) {
+      await pc.setRemoteDescription(d.sdp);
+      if (d.sdp.type === "offer") {
+        await pc.setLocalDescription(await pc.createAnswer());
+        send({ type: "signal", to: m.from, data: { sdp: pc.localDescription } });
+      }
+    } else if (d.candidate) { try { await pc.addIceCandidate(d.candidate); } catch (e) {} }
+  } else if (m.type === "state") {
+    $("status").textContent = !m.mc ? "⚠️ ยังไม่เชื่อม Minecraft (ได้ยินกันเต็มเสียง)"
+      : m.located ? "✅ เชื่อม Minecraft แล้ว" : "⚠️ หาตัวคุณในเกมไม่เจอ (เช็คชื่อ Gamertag)";
+    for (const n in peers) {
+      const v = m.volumes[n] ?? 0; peers[n].vol = v;
+      peers[n].gain.gain.setTargetAtTime(v, ctx.currentTime, 0.1);
+    }
+    render();
+  }
+}
+
+function render() {
+  $("list").innerHTML = Object.entries(peers).map(([n, p]) =>
+    `<div class="row"><span>${n.replace(/[<>&]/g, "")}</span><div class="bar"><i style="width:${Math.round(p.vol * 100)}%"></i></div></div>`
+  ).join("") || "<div style='color:#888'>ยังไม่มีคนอื่น</div>";
+}
+
+let muted = false;
+$("mute").onclick = () => {
+  muted = !muted;
+  stream.getAudioTracks().forEach((t) => (t.enabled = !muted));
+  $("mute").textContent = muted ? "🔇 ไมค์: ปิด" : "🎤 ไมค์: เปิด";
+  $("mute").className = muted ? "off" : "";
+};
+$("range").oninput = (e) => { $("rv").textContent = e.target.value; send({ type: "range", range: +e.target.value }); };
+</script></body></html>
